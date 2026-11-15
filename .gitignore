@@ -1,0 +1,42 @@
+# ===================================================================
+# LOCAL WORKSPACE ONLY — NEVER COMMIT TO PUBLIC GITHUB
+# These contain internal AI instructions, raw strategy database, and
+# weekly workflow artifacts. Keep strictly on local machine.
+# ===================================================================
+
+# AI Instruction Files
+CLAUDE.md
+Instructions.md
+CONTENT_PLAYBOOK.md
+
+# Local Strategy Database (Input → Analysis → Classification)
+Strategy_Codes/
+  Input/
+  Successful/
+  Failed/
+
+# Weekly Internal Workflow Artifacts
+Scenarios/
+Weekly_Content/
+
+# OS / Editor Artifacts
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+*.log
+
+# Local Claude settings
+.claude/
+CLAUDE.md
+*_success.txt
+generate_*.py
+_*
+peompt.txt
+
+# ===================================================================
+# PUBLIC CONTENT (Tracked) — Content folders like 01-*, 02-*, etc.
+# and root assets/, README.md, LICENSE
+# ===================================================================

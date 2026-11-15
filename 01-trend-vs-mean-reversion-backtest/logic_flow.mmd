@@ -1,0 +1,212 @@
+%% Mermaid Flowcharts: Donchian EMA Trend vs BB RSI Mean Reversion
+%% Render natively on GitHub — copy into any .md file with ```mermaid
+
+---
+
+### 🟢 Donchian EMA Trend — Logic Flow (Successful +42%)
+
+```mermaid
+flowchart TD
+    %% Styles
+    classDef entry fill:#00D4AA,color:#0A0F1C,stroke:#00D4AA,stroke-width:2px
+    classDef exit fill:#FF4757,color:#FFFFFF,stroke:#FF4757,stroke-width:2px
+    classDef decision fill:#FFA502,color:#0A0F1C,stroke:#FFA502,stroke-width:2px
+    classDef process fill:#70A1FF,color:#FFFFFF,stroke:#70A1FF,stroke-width:2px
+    classDef startend fill:#0A0F1C,color:#FFFFFF,stroke:#00D4AA,stroke-width:2px
+
+    START([START<br/>New 4H Bar]):::startend
+    WARMUP{Indicators<br/>Ready?}:::decision
+    DONCHIAN[Donchian Ch 34<br/>Upper Band]:::process
+    EMA200[EMA 200<br/>Trend Filter]:::process
+    PRICE{Price > EMA 200?}:::decision
+    BREAK{Price > Donchian<br/>Upper Band?}:::decision
+    ENTRY_LONG[LONG ENTRY<br/>Market Order 80%]:::entry
+    SL[Stop Loss: 2×ATR(14)]:::exit
+    TP[Take Profit: 8%]:::exit
+    HOLD{In Position?}:::decision
+    BARS_HELD{Bars Held<br/>>= 60?}:::decision
+    TIMEOUT[Timeout Exit<br/>Liquidate]:::exit
+    DONCHIAN_EXIT[Donchian Ch 7<br/>Lower Band]:::process
+    SIG_EXIT{Price < Donchian<br/>Lower Band?}:::decision
+    SIGNAL_EXIT[Signal Exit<br/>Liquidate]:::exit
+    END([END]):::startend
+
+    START --> WARMUP
+    WARMUP -- No --> END
+    WARMUP -- Yes --> DONCHIAN
+    DONCHIAN --> EMA200
+    EMA200 --> PRICE
+    PRICE -- No --> END
+    PRICE -- Yes --> BREAK
+    BREAK -- No --> END
+    BREAK -- Yes --> ENTRY_LONG
+    ENTRY_LONG --> SL
+    ENTRY_LONG --> TP
+    SL --> HOLD
+    TP --> HOLD
+    HOLD -- No --> END
+    HOLD -- Yes --> BARS_HELD
+    BARS_HELD -- Yes --> TIMEOUT
+    BARS_HELD -- No --> DONCHIAN_EXIT
+    DONCHIAN_EXIT --> SIG_EXIT
+    SIG_EXIT -- Yes --> SIGNAL_EXIT
+    SIG_EXIT -- No --> END
+    TIMEOUT --> END
+    SIGNAL_EXIT --> END
+```
+
+---
+
+### 🔴 BB RSI Mean Reversion — Logic Flow (Failed -12%)
+
+```mermaid
+flowchart TD
+    %% Styles
+    classDef entry fill:#FF4757,color:#FFFFFF,stroke:#FF4757,stroke-width:2px
+    classDef exit fill:#00D4AA,color:#0A0F1C,stroke:#00D4AA,stroke-width:2px
+    classDef decision fill:#FFA502,color:#0A0F1C,stroke:#FFA502,stroke-width:2px
+    classDef process fill:#70A1FF,color:#FFFFFF,stroke:#70A1FF,stroke-width:2px
+    classDef startend fill:#0A0F1C,color:#FFFFFF,stroke:#FF4757,stroke-width:2px
+    classDef warning fill:#FF4757,color:#FFFFFF,stroke:#FF4757,stroke-width:3px,stroke-dasharray: 5 5
+
+    START([START<br/>New 1H Bar]):::startend
+    WARMUP{Indicators<br/>Ready?}:::decision
+    BB[Bollinger Bands<br/>20, 2σ]:::process
+    RSI[RSI 14]:::process
+    SMA20[SMA 20<br/>Middle Band]:::process
+
+    %% LONG PATH
+    LONG_BB{Price < Lower<br/>Band?}:::decision
+    LONG_RSI{RSI < 30?}:::decision
+    LONG_ENTRY[LONG ENTRY<br/>Market Order 80%]:::entry
+
+    %% SHORT PATH
+    SHORT_BB{Price > Upper<br/>Band?}:::decision
+    SHORT_RSI{RSI > 70?}:::decision
+    SHORT_ENTRY[SHORT ENTRY<br/>Market Order -80%]:::entry
+
+    %% EXITS
+    SL_LONG[Stop Loss: 2.5%]:::exit
+    TP_LONG[Take Profit: 5%]:::exit
+    SL_SHORT[Stop Loss: 2.5%]:::exit
+    TP_SHORT[Take Profit: 5%]:::exit
+
+    HOLD{In Position?}:::decision
+    BARS{Bars Held<br/>>= 24?}:::decision
+    TIMEOUT[Timeout Exit<br/>Liquidate]:::exit
+    MIDDLE_CROSS{Price Crossed<br/>Middle Band?}:::decision
+    SIGNAL_EXIT[Signal Exit<br/>Liquidate]:::exit
+
+    NO_TREND_FILTER[⚠️ NO TREND FILTER<br/>Fights every trend move]:::warning
+
+    END([END]):::startend
+
+    START --> WARMUP
+    WARMUP -- No --> END
+    WARMUP -- Yes --> BB
+    BB --> RSI
+    RSI --> SMA20
+
+    %% LONG BRANCH
+    SMA20 --> LONG_BB
+    LONG_BB -- No --> SHORT_BB
+    LONG_BB -- Yes --> LONG_RSI
+    LONG_RSI -- No --> SHORT_BB
+    LONG_RSI -- Yes --> LONG_ENTRY
+    LONG_ENTRY --> SL_LONG
+    LONG_ENTRY --> TP_LONG
+
+    %% SHORT BRANCH
+    SHORT_BB -- No --> HOLD
+    SHORT_BB -- Yes --> SHORT_RSI
+    SHORT_RSI -- No --> HOLD
+    SHORT_RSI -- Yes --> SHORT_ENTRY
+    SHORT_ENTRY --> SL_SHORT
+    SHORT_ENTRY --> TP_SHORT
+
+    %% EXITS
+    SL_LONG --> HOLD
+    TP_LONG --> HOLD
+    SL_SHORT --> HOLD
+    TP_SHORT --> HOLD
+
+    HOLD -- No --> END
+    HOLD -- Yes --> BARS
+    BARS -- Yes --> TIMEOUT
+    BARS -- No --> MIDDLE_CROSS
+    MIDDLE_CROSS -- Yes --> SIGNAL_EXIT
+    MIDDLE_CROSS -- No --> END
+
+    TIMEOUT --> END
+    SIGNAL_EXIT --> END
+
+    %% Warning annotation
+    NO_TREND_FILTER -.-> LONG_ENTRY
+    NO_TREND_FILTER -.-> SHORT_ENTRY
+```
+
+---
+
+### 📊 Side-by-Side Decision Comparison
+
+```mermaid
+flowchart LR
+    subgraph DONCHIAN["🟢 Donchian + EMA (Winner)"]
+        D1[Price > 200 EMA?] -->|YES| D2[Break Donchian<br/>Upper 34?]
+        D2 -->|YES| D3[LONG]
+        D1 -->|NO| D4[Stay Flat]
+        D2 -->|NO| D4
+    end
+
+    subgraph BBRSI["🔴 BB + RSI (Loser)"]
+        B1[Price < Lower BB?] -->|YES| B2[RSI < 30?]
+        B2 -->|YES| B3[LONG<br/>(even in downtrend!)]
+        B1 -->|NO| B4[Price > Upper BB?]
+        B4 -->|YES| B5[RSI > 70?]
+        B5 -->|YES| B6[SHORT<br/>(even in uptrend!)]
+        B4 -->|NO| B7[Wait]
+        B2 -->|NO| B7
+        B5 -->|NO| B7
+    end
+
+    style DONCHIAN fill:#00D4AA15,stroke:#00D4AA,stroke-width:2px
+    style BBRSI fill:#FF475715,stroke:#FF4757,stroke-width:2px
+    style D3 fill:#00D4AA,color:#0A0F1C
+    style B3 fill:#FF4757,color:#FFFFFF
+    style B6 fill:#FF4757,color:#FFFFFF
+```
+
+---
+
+### 🔑 Key Difference Visualized
+
+```mermaid
+flowchart TD
+    TREND[Market Trend<br/>2024-2025: Strong Uptrend] --> DONCHIAN[🟢 Donchian + EMA]
+    TREND --> BBRSI[🔴 BB + RSI]
+
+    DONCHIAN --> D_FILTER{200 EMA Gate}
+    D_FILTER -- Price > EMA --> D_LONG[Only Longs in Uptrend ✅]
+    D_FILTER -- Price < EMA --> D_FLAT[Stays Flat ✅]
+
+    BBRSI --> B_NOFILTER[No Trend Filter]
+    B_NOFILTER --> B_LONG[Longs Oversold Dips ❌]
+    B_NOFILTER --> B_SHORT[Shorts Overbought Rips ❌]
+
+    D_LONG --> D_RESULT[+42% Return<br/>-16% Max DD]
+    B_LONG --> B_RESULT[-12% Return<br/>-21% Max DD]
+    B_SHORT --> B_RESULT
+
+    style TREND fill:#0A0F1C,color:#FFFFFF,stroke:#00D4AA,stroke-width:2px
+    style DONCHIAN fill:#00D4AA15,stroke:#00D4AA
+    style BBRSI fill:#FF475715,stroke:#FF4757
+    style D_FILTER fill:#FFA502,color:#0A0F1C
+    style B_NOFILTER fill:#FFA502,color:#0A0F1C
+    style D_RESULT fill:#00D4AA,color:#0A0F1C
+    style B_RESULT fill:#FF4757,color:#FFFFFF
+```
+
+---
+
+*Render on GitHub: These Mermaid diagrams render natively in any `.md` file on GitHub.*
+*Colors: SharkDev.ai brand — Teal `#00D4AA`, Dark `#0A0F1C`, Red `#FF4757`, Amber `#FFA502`, Blue `#70A1FF`*
