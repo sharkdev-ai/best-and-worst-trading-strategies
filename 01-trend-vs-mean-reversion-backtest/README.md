@@ -138,16 +138,10 @@ flowchart TD
 
     LONG_BB{Price < Lower<br/>Band?}:::decision
     LONG_RSI{RSI < 30?}:::decision
-    LONG_ENTRY[LONG ENTRY<br/>Market Order 80%]:::entry
-
-    SHORT_BB{Price > Upper<br/>Band?}:::decision
-    SHORT_RSI{RSI > 70?}:::decision
-    SHORT_ENTRY[SHORT ENTRY<br/>Market Order -80%]:::entry
+    LONG_ENTRY[LONG ENTRY<br/>Market Order 100%]:::entry
 
     SL_LONG[Stop Loss: 2.5%]:::exit
     TP_LONG[Take Profit: 5%]:::exit
-    SL_SHORT[Stop Loss: 2.5%]:::exit
-    TP_SHORT[Take Profit: 5%]:::exit
 
     HOLD{In Position?}:::decision
     BARS{Bars Held<br/>>= 24?}:::decision
@@ -166,24 +160,15 @@ flowchart TD
     RSI --> SMA20
 
     SMA20 --> LONG_BB
-    LONG_BB -- No --> SHORT_BB
+    LONG_BB -- No --> HOLD
     LONG_BB -- Yes --> LONG_RSI
-    LONG_RSI -- No --> SHORT_BB
+    LONG_RSI -- No --> HOLD
     LONG_RSI -- Yes --> LONG_ENTRY
     LONG_ENTRY --> SL_LONG
     LONG_ENTRY --> TP_LONG
 
-    SHORT_BB -- No --> HOLD
-    SHORT_BB -- Yes --> SHORT_RSI
-    SHORT_RSI -- No --> HOLD
-    SHORT_RSI -- Yes --> SHORT_ENTRY
-    SHORT_ENTRY --> SL_SHORT
-    SHORT_ENTRY --> TP_SHORT
-
     SL_LONG --> HOLD
     TP_LONG --> HOLD
-    SL_SHORT --> HOLD
-    TP_SHORT --> HOLD
 
     HOLD -- No --> END
     HOLD -- Yes --> BARS
@@ -196,7 +181,6 @@ flowchart TD
     SIGNAL_EXIT --> END
 
     NO_TREND_FILTER -.-> LONG_ENTRY
-    NO_TREND_FILTER -.-> SHORT_ENTRY
 ```
 
 ### ⚔️ The Critical Difference
@@ -212,20 +196,15 @@ flowchart LR
 
     subgraph BBRSI["🔴 BB + RSI (Loser)"]
         B1[Price < Lower BB?] -->|YES| B2[RSI < 30?]
-        B2 -->|YES| B3[LONG<br/>(even in downtrend!)]
-        B1 -->|NO| B4[Price > Upper BB?]
-        B4 -->|YES| B5[RSI > 70?]
-        B5 -->|YES| B6[SHORT<br/>(even in uptrend!)]
-        B4 -->|NO| B7[Wait]
+        B2 -->|YES| B3[LONG 100%<br/>(even in downtrend!)]
+        B1 -->|NO| B7[Wait]
         B2 -->|NO| B7
-        B5 -->|NO| B7
     end
 
     style DONCHIAN fill:#00D4AA15,stroke:#00D4AA,stroke-width:2px
     style BBRSI fill:#FF475715,stroke:#FF4757,stroke-width:2px
     style D3 fill:#00D4AA,color:#0A0F1C
     style B3 fill:#FF4757,color:#FFFFFF
-    style B6 fill:#FF4757,color:#FFFFFF
 ```
 
 ---

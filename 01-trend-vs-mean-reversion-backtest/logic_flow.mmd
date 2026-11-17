@@ -78,18 +78,11 @@ flowchart TD
     %% LONG PATH
     LONG_BB{Price < Lower<br/>Band?}:::decision
     LONG_RSI{RSI < 30?}:::decision
-    LONG_ENTRY[LONG ENTRY<br/>Market Order 80%]:::entry
-
-    %% SHORT PATH
-    SHORT_BB{Price > Upper<br/>Band?}:::decision
-    SHORT_RSI{RSI > 70?}:::decision
-    SHORT_ENTRY[SHORT ENTRY<br/>Market Order -80%]:::entry
+    LONG_ENTRY[LONG ENTRY<br/>Market Order 100%]:::entry
 
     %% EXITS
     SL_LONG[Stop Loss: 2.5%]:::exit
     TP_LONG[Take Profit: 5%]:::exit
-    SL_SHORT[Stop Loss: 2.5%]:::exit
-    TP_SHORT[Take Profit: 5%]:::exit
 
     HOLD{In Position?}:::decision
     BARS{Bars Held<br/>>= 24?}:::decision

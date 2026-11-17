@@ -1,153 +1,709 @@
-"""
-BB RSI Mean Reversion Strategy — Failed (-12% Return, -21% Max DD)
+from datetime import timedelta, datetime
+from dataclasses import dataclass, field
+from sharkdev_imports import *
 
-Strategy Type: Counter-Trend Mean Reversion (Bollinger Bands + RSI)
-Pair: ETHUSD
-Timeframe: 1H
-Backtest Period: 2024-01-01 to 2025-01-01
-Platform: QuantConnect/Lean via SharkDev.ai
+@dataclass
+class TimeframeData:
 
-PARAMETERS (Optimized — ALL VARIANTS LOST):
-- bb_period: 20           (Bollinger Bands period)
-- bb_std_dev: 2.0         (Standard deviations for bands)
-- rsi_period: 14          (RSI period)
-- rsi_oversold: 30        (RSI threshold for long entry)
-- rsi_overbought: 70      (RSI threshold for short entry)
-- stop_loss_pct: 2.5%     (Fixed stop loss)
-- take_profit_pct: 5.0%   (Fixed take profit)
-- timeout_bars: 24        (Max bars held — 1H = 24 hours)
+    multiplier: int
+    resolution: Resolution
 
-LOGIC:
-1. LONG ENTRY:  Price < Lower Bollinger Band AND RSI < 30
-2. SHORT ENTRY: Price > Upper Bollinger Band AND RSI > 70
-3. EXIT:
-   - Stop Loss: 2.5% fixed from entry
-   - Take Profit: 5% fixed from entry
-   - Signal Exit: Price crosses middle band (20 SMA)
-   - Timeout: 24 bars (1H = 24 hours)
+@dataclass
+class IndicatorData:
 
-KEY FAILURE MODES (identified via SharkDev.ai optimization):
-- ❌ NO TREND FILTER — Shorts every overbought rip in uptrends, longs every oversold dip in downtrends
-- ❌ 1H TIMEFRAME — Extreme whipsaw; noise dominates signal
-- ❌ RIGID RSI THRESHOLDS — 30/70 too tight for crypto volatility
-- ❌ ZERO WINNING VARIANTS — Optimization landscape was entirely red across all parameter combos
+    name: str
+    timeframe: TimeframeData
+    indicator_class: Indicator
 
-EDUCATIONAL VALUE: This strategy demonstrates why mean reversion fails in strongly trending markets
-without a trend filter. The same signal score (54) produced opposite PnL because LOGIC STRUCTURE
-matters more than raw signal quality.
-"""
+@dataclass
+class SymbolData:
 
-from AlgorithmImports import *
+    symbol: Symbol
+    indicators: dict[str, Indicator] = field(default_factory=dict)
+    end_time: datetime = None
+    ask_open: float = None
+    ask_high: float = None
+    ask_low: float = None
+    ask_close: float = None
+    last_ask_size: float = None
+    bid_open: float = None
+    bid_high: float = None
+    bid_low: float = None
+    bid_close: float = None
+    last_bid_size: float = None
+    mid_open: float = None
+    mid_high: float = None
+    mid_low: float = None
+    mid_close: float = None
+    spread: float = None
 
-class BBRsiMeanReversion(QCAlgorithm):
+    entry_ticket: OrderTicket = None
+    stop_ticket: OrderTicket = None
+    target_ticket: OrderTicket = None
+    trailing_ticket: OrderTicket = None
 
-    def Initialize(self):
-        # --- Core Settings ---
-        self.SetStartDate(2024, 1, 1)
-        self.SetEndDate(2025, 1, 1)
-        self.SetCash(10000)
-        self.SetTimeZone(TimeZones.NewYork)
-        self.SetBrokerageModel(BrokerageName.Binance, AccountType.Cash)
+    pending_entry_time: datetime = None
+    position_open_time: datetime = None
+    last_exit_time: datetime = None
 
-        # --- Parameters (from SharkDev.ai optimization — ALL LOST) ---
-        self.bb_period        = self.GetParameter("bb_period", 20)
-        self.bb_std_dev       = self.GetParameter("bb_std_dev", 2.0)
-        self.rsi_period       = self.GetParameter("rsi_period", 14)
-        self.rsi_oversold     = self.GetParameter("rsi_oversold", 30)
-        self.rsi_overbought   = self.GetParameter("rsi_overbought", 70)
-        self.stop_loss_pct    = self.GetParameter("stop_loss_pct", 0.025)
-        self.take_profit_pct  = self.GetParameter("take_profit_pct", 0.05)
-        self.timeout_bars     = self.GetParameter("timeout_bars", 24)
+class Strategy(QCAlgorithm):
 
-        # --- Indicators (1H resolution) ---
-        # Bollinger Bands: Upper, Middle (SMA), Lower
-        self.bb = self.BB("ETHUSD", self.bb_period, self.bb_std_dev, Resolution.Hour)
+    def initialize(self):
+        self.settings.automatic_indicator_warm_up = True
+        self.set_time_zone(TimeZones.NEW_YORK)
+        self.set_brokerage_model(BrokerageName.BINANCE, AccountType.CASH)
 
-        # RSI for oversold/overbought confirmation
-        self.rsi = self.RSI("ETHUSD", self.rsi_period, Resolution.Hour)
+        self.security_type: str = "crypto"
 
-        # Middle band (20 SMA) for signal exit
-        self.sma_middle = self.SMA("ETHUSD", self.bb_period, Resolution.Hour)
+        if not self.live_mode:
+            self.set_cash(1000.0)
+            self.set_start_date(2024, 1, 1)
+            self.set_end_date(2025, 1, 1)
 
-        # Warm-up for indicators
-        self.SetWarmUp(100, Resolution.Hour)
+        self._configure_warm_up()
 
-        # Position tracking
-        self.entry_price = 0
-        self.bars_held = 0
-        self.position_side = 0  # 1 = long, -1 = short
+        self.data = {}
+        self.order_to_data = {}
+        self.primary_symbol = None
+        self.pos_sizes = {}
 
-    def OnData(self, data):
-        # Wait for indicators to be ready
-        if self.IsWarmingUp:
+        self._initialize_strategy()
+        self._recover_position_state()
+
+    def _recover_position_state(self):
+        for data in self.data.values():
+            recover_position_state(self, data)
+
+    def _configure_warm_up(self):
+        days = resolve_warmup_days(
+            3, 30, self.live_mode
+        )
+        self.set_warm_up(timedelta(days=days), Resolution.HOUR)
+
+    def _map_live_ticker(self, ticker):
+        if not self.live_mode or self.security_type != "crypto":
+            return ticker
+        return derive_live_ticker(ticker)
+
+    def _is_effectively_flat(self, data, holdings):
+        return is_effectively_flat(self, data.symbol, holdings)
+
+    def _is_effectively_invested(self, data, holdings):
+        return is_effectively_invested(self, data.symbol, holdings)
+
+    def on_brokerage_message(self, message):
+        self.log(f"BROKERAGE MESSAGE: {message}")
+        self._recover_position_state()
+
+    def on_brokerage_disconnect(self):
+        self.log("BROKERAGE DISCONNECT")
+
+    def on_brokerage_reconnect(self):
+        self.log("BROKERAGE RECONNECT")
+        self._recover_position_state()
+
+    def on_warmup_finished(self):
+        try:
+            entries = []
+            for ticker, data in self.data.items():
+                for name, indicator in data.indicators.items():
+                    entries.append(
+                        (ticker, name, indicator.is_ready, indicator.current.value)
+                    )
+            ready_count = sum(1 for _, _, ready, _ in entries if ready)
+            self.log(
+                f"WARMUP FINISHED: live_mode={self.live_mode} "
+                f"is_warming_up={self.is_warming_up} "
+                f"indicators_ready={ready_count}/{len(entries)}"
+            )
+            if not entries:
+                self.log(
+                    "WARMUP INDICATOR: none registered by generated code "
+                    "(expected only when the spec declares no indicators)"
+                )
+            for ticker, name, ready, value in entries:
+                self.log(
+                    f"WARMUP INDICATOR: {ticker}:{name} ready={ready} value={value}"
+                )
+        except Exception as exception:
+            self.log(f"WARMUP FINISHED: readiness log failed: {exception}")
+
+    def _resolve_consolidator_timedelta(self, timeframe: TimeframeData) -> timedelta:
+        if timeframe.resolution == Resolution.DAILY:
+            return timedelta(days=timeframe.multiplier)
+        return timedelta(hours=timeframe.multiplier)
+
+    def _add_symbol_consolidator(self, symbol: Symbol, symbol_timedelta: timedelta):
+        consolidator = QuoteBarConsolidator(symbol_timedelta)
+        consolidator.data_consolidated += self._on_consolidated_bar
+        self.subscription_manager.add_consolidator(symbol, consolidator, TickType.QUOTE)
+
+    def _add_indicator_consolidator(
+        self, symbol: Symbol, indicator: Indicator, indicator_timedelta: timedelta
+    ):
+        consolidator = TradeBarConsolidator(indicator_timedelta)
+        self.register_indicator(
+            symbol,
+            indicator,
+            consolidator,
+        )
+
+    def _add_symbol_subscription(
+        self,
+        ticker: str,
+        symbol_timeframe: TimeframeData,
+        indicators: list[IndicatorData],
+    ):
+        resolution = symbol_timeframe.resolution
+        market = Market.BINANCE if self.live_mode else Market.DUKASCOPY
+        if self.live_mode:
+            ticker = self._map_live_ticker(ticker)
+
+        if self.security_type == "crypto":
+            security = self.add_crypto(
+                ticker,
+                resolution,
+                fill_forward=False,
+                market=market,
+            )
+        elif self.security_type == "forex":
+            security = self.add_forex(
+                ticker,
+                resolution,
+                fill_forward=False,
+                market=market,
+                leverage=50.0,
+            )
+            security.set_fee_model(InteractiveBrokersFeeModel())
+        elif self.security_type == "equity":
+            security = self.add_equity(
+                ticker,
+                resolution,
+                fill_forward=False,
+                market=market,
+            )
+            security.is_tradable = False
+        else:
+            raise ValueError(
+                "Only support forex, crypto and equity, other symbol types will be added soon!"
+            )
+
+        data = SymbolData(security.symbol)
+
+        for indicator in indicators:
+            time_delta = self._resolve_consolidator_timedelta(indicator.timeframe)
+            self._add_indicator_consolidator(
+                data.symbol, indicator.indicator_class, time_delta
+            )
+            data.indicators[indicator.name] = indicator.indicator_class
+
+        symbol_timedelta = self._resolve_consolidator_timedelta(symbol_timeframe)
+        self._add_symbol_consolidator(data.symbol, symbol_timedelta)
+
+        self.data[ticker] = data
+
+        if self.primary_symbol is None:
+            self.primary_symbol = data.symbol
+            self.set_benchmark(data.symbol)
+
+        return data
+
+    def _initialize_strategy(self):
+
+        self.stop_loss_pct = float(self.get_parameter("stop_loss_pct", 0.025))
+        self.take_profit_pct = float(self.get_parameter("take_profit_pct", 0.05))
+        self.timeout_bars = int(self.get_parameter("timeout_bars", 24))
+        self.bb_period = int(self.get_parameter("bb_period", 20))
+        self.bb_k = float(self.get_parameter("bb_k", 2.0))
+        self.rsi_period = int(self.get_parameter("rsi_period", 14))
+        self.rsi_oversold = int(self.get_parameter("rsi_oversold", 30))
+        self.rsi_overbought = int(self.get_parameter("rsi_overbought", 70))
+
+        bb = BollingerBands(self.bb_period, self.bb_k)
+        rsi = RelativeStrengthIndex(self.rsi_period)
+
+        indicators = [
+            IndicatorData(
+                name="BollingerBands",
+                timeframe=TimeframeData(multiplier=1, resolution=Resolution.HOUR),
+                indicator_class=bb
+            ),
+            IndicatorData(
+                name="RelativeStrengthIndex",
+                timeframe=TimeframeData(multiplier=1, resolution=Resolution.HOUR),
+                indicator_class=rsi
+            )
+        ]
+
+        data = self._add_symbol_subscription(
+            "ETHUSD",
+            TimeframeData(multiplier=1, resolution=Resolution.HOUR),
+            indicators=indicators
+        )
+
+        self.pos_sizes[data.symbol.value] = 1.0
+
+    def _is_quote_valid(self, bar: QuoteBar) -> bool:
+        if bar is None:
+            return False
+        if bar.ask is None or bar.bid is None:
+            return False
+
+        def _is_valid_number(value):
+            if value is None:
+                return False
+            try:
+                return value == value
+            except Exception:
+                return False
+
+        for side_bar in [bar.ask, bar.bid]:
+            for field in ["open", "high", "low", "close"]:
+                if not _is_valid_number(getattr(side_bar, field, None)):
+                    return False
+
+        return True
+
+    def _is_indicators_valid(self, data: SymbolData) -> bool:
+        for indicator in data.indicators.values():
+            if not indicator.is_ready:
+                return False
+            if (
+                indicator.current.value is None
+                or indicator.current.value != indicator.current.value
+            ):
+                return False
+        return True
+
+    def _update_quote(self, data: SymbolData, bar: QuoteBar):
+
+        data.end_time = bar.end_time
+
+        data.ask_open = bar.ask.open
+        data.ask_high = bar.ask.high
+        data.ask_low = bar.ask.low
+        data.ask_close = bar.ask.close
+        data.last_ask_size = bar.last_ask_size
+
+        data.bid_open = bar.bid.open
+        data.bid_high = bar.bid.high
+        data.bid_low = bar.bid.low
+        data.bid_close = bar.bid.close
+        data.last_bid_size = bar.last_bid_size
+
+        data.mid_open = bar.open
+        data.mid_high = bar.high
+        data.mid_low = bar.low
+        data.mid_close = bar.close
+        data.spread = data.ask_close - data.bid_close
+
+    def _update_indicators(self, data: SymbolData):
+
+        bb = data.indicators.get("BollingerBands")
+        rsi = data.indicators.get("RelativeStrengthIndex")
+
+        if bb is not None and bb.is_ready:
+            data.prev_bb_upper = getattr(data, "curr_bb_upper", bb.upper_band.current.value)
+            data.prev_bb_lower = getattr(data, "curr_bb_lower", bb.lower_band.current.value)
+            data.prev_bb_middle = getattr(data, "curr_bb_middle", bb.middle_band.current.value)
+            data.curr_bb_upper = bb.upper_band.current.value
+            data.curr_bb_lower = bb.lower_band.current.value
+            data.curr_bb_middle = bb.middle_band.current.value
+
+        if rsi is not None and rsi.is_ready:
+            data.prev_rsi = getattr(data, "curr_rsi", rsi.current.value)
+            data.curr_rsi = rsi.current.value
+
+    def _on_consolidated_bar(self, sender, bar: QuoteBar):
+        data = self.data.get(bar.symbol.value, None)
+
+        if data is None or not self._is_quote_valid(bar):
             return
 
-        if not data.ContainsKey("ETHUSD"):
+        self._update_quote(data, bar)
+
+        if not self._is_indicators_valid(data):
             return
 
-        price = data["ETHUSD"].Close
-        holdings = self.Portfolio["ETHUSD"].Quantity
+        self._update_indicators(data)
 
-        # --- ENTRY LOGIC ---
-        if holdings == 0:
-            # LONG: Price below Lower BB AND RSI oversold
-            long_signal = (price < self.bb.LowerBand.Current.Value and
-                          self.rsi.Current.Value < self.rsi_oversold)
+        if self.is_warming_up:
+            return
 
-            # SHORT: Price above Upper BB AND RSI overbought
-            short_signal = (price > self.bb.UpperBand.Current.Value and
-                           self.rsi.Current.Value > self.rsi_overbought)
+        self._process_symbol(data)
 
-            if long_signal:
-                quantity = self.CalculateOrderQuantity("ETHUSD", 0.8)
-                if quantity > 0:
-                    self.MarketOrder("ETHUSD", quantity)
-                    self.entry_price = price
-                    self.bars_held = 0
-                    self.position_side = 1
+    def _to_lot_size_multiple(self, symbol: Symbol, raw_quantity: float) -> float:
+        return to_lot_size_multiple(self, symbol, raw_quantity)
 
-                    stop_price = price * (1 - self.stop_loss_pct)
-                    target_price = price * (1 + self.take_profit_pct)
-                    self.StopMarketOrder("ETHUSD", -quantity, stop_price, tag="SL")
-                    self.LimitOrder("ETHUSD", -quantity, target_price, tag="TP")
+    def _to_tick_size_multiple(self, symbol: Symbol, price: float) -> float:
+        return to_tick_size_multiple(self, symbol, price)
 
-            elif short_signal:
-                quantity = self.CalculateOrderQuantity("ETHUSD", -0.8)
-                if quantity < 0:
-                    self.MarketOrder("ETHUSD", quantity)
-                    self.entry_price = price
-                    self.bars_held = 0
-                    self.position_side = -1
+    def _cancel_bracket_orders(self, data: SymbolData):
 
-                    stop_price = price * (1 + self.stop_loss_pct)
-                    target_price = price * (1 - self.take_profit_pct)
-                    self.StopMarketOrder("ETHUSD", -quantity, stop_price, tag="SL")
-                    self.LimitOrder("ETHUSD", -quantity, target_price, tag="TP")
+        self._cancel_ticket(data.stop_ticket, "Cancel stop")
+        self._cancel_ticket(data.target_ticket, "Cancel target")
+        self._cancel_ticket(data.trailing_ticket, "Cancel trailing")
+        self._clear_ticket(data, "stop_ticket")
+        self._clear_ticket(data, "target_ticket")
+        self._clear_ticket(data, "trailing_ticket")
 
-        # --- EXIT LOGIC ---
-        elif holdings != 0:
-            self.bars_held += 1
+    def _is_open_order(self, ticket: OrderTicket):
+        return ticket is not None and ticket.status not in [
+            OrderStatus.FILLED,
+            OrderStatus.CANCELED,
+            OrderStatus.INVALID,
+        ]
 
-            if self.position_side == 1:  # LONG position
-                # 1. Signal Exit: Price crosses back above middle band
-                if price > self.sma_middle.Current.Value:
-                    self.Liquidate("ETHUSD", "Signal Exit: Cross Middle Band")
+    def _has_pending_entry(self, data: SymbolData):
+        return self._is_open_order(data.entry_ticket)
+
+    def _cancel_ticket(self, ticket, tag):
+        if self._is_open_order(ticket):
+            ticket.cancel(tag)
+
+    def _register_ticket(self, data: SymbolData, key: str, ticket: OrderTicket):
+        old_ticket: OrderTicket = getattr(data, key)
+        if (
+            old_ticket is not None
+            and ticket is not None
+            and old_ticket.order_id != ticket.order_id
+        ):
+            self.order_to_data.pop(old_ticket.order_id, None)
+
+        setattr(data, key, ticket)
+        if ticket is not None:
+            self.order_to_data[ticket.order_id] = data
+
+    def _clear_ticket(self, data: SymbolData, key: str):
+        ticket: OrderTicket = getattr(data, key)
+        if ticket is not None:
+            self.order_to_data.pop(ticket.order_id, None)
+        setattr(data, key, None)
+
+    def _get_order(self, order_id: int):
+        return self.transactions.get_order_by_id(order_id)
+
+    def _close_position(self, data: SymbolData, reason: str):
+
+        self._cancel_bracket_orders(data)
+        self.liquidate(data.symbol, reason)
+        data.position_open_time = None
+        data.last_exit_time = self.time
+
+    def _calculate_entry_quantity(
+        self, data: SymbolData, entry_direction: int
+    ) -> float:
+
+        if entry_direction == 0:
+            return 0
+
+        ticker = data.symbol.value
+        position_size_pct = float(self.pos_sizes[ticker])
+        target_pct = entry_direction * position_size_pct
+
+        return self.calculate_order_quantity(data.symbol, target_pct)
+
+    def _submit_order(
+        self,
+        data: SymbolData,
+        order_type: str,
+        quantity: float,
+        *,
+        target_pct: float = None,
+        limit_price: float = None,
+        stop_price: float = None,
+        tag: str = "",
+    ):
+        symbol = data.symbol
+
+        if order_type == "set_holdings":
+            if target_pct is None:
+                raise ValueError("set_holdings entry requires target_pct")
+            quantity = self.calculate_order_quantity(symbol, target_pct)
+            quantity = self._to_lot_size_multiple(symbol, quantity)
+            if quantity == 0:
+                return None
+            return self.market_order(symbol=symbol, quantity=quantity, tag=tag)
+
+        if order_type == "market":
+            quantity = self._to_lot_size_multiple(symbol, quantity)
+            if quantity == 0:
+                return None
+            return self.market_order(symbol=symbol, quantity=quantity, tag=tag)
+
+        if order_type == "limit":
+            if limit_price is None:
+                raise ValueError("limit entry requires limit_price")
+            return self.limit_order(
+                symbol=symbol,
+                quantity=quantity,
+                limit_price=limit_price,
+                tag=tag,
+            )
+
+        if order_type == "stop_limit":
+            if stop_price is None or limit_price is None:
+                raise ValueError("stop_limit entry requires stop_price and limit_price")
+            return self.stop_limit_order(
+                symbol=symbol,
+                quantity=quantity,
+                stop_price=stop_price,
+                limit_price=limit_price,
+                tag=tag,
+            )
+
+        if order_type == "stop_market":
+            if stop_price is None:
+                raise ValueError("stop_market entry requires stop_price")
+            return self.stop_market_order(
+                symbol=symbol,
+                quantity=quantity,
+                stop_price=stop_price,
+                tag=tag,
+            )
+
+    def _process_symbol(self, data: SymbolData):
+
+        if data.mid_close is None or data.ask_close is None or data.bid_close is None:
+            return
+
+        holdings = self.portfolio[data.symbol].quantity
+        is_flat = self._is_effectively_flat(data, holdings)
+        is_invested = self._is_effectively_invested(data, holdings)
+
+        if self._has_pending_entry(data) and data.pending_entry_time is not None:
+            pass
+
+        price = data.mid_close
+        bb_lower = getattr(data, "curr_bb_lower", None)
+        bb_middle = getattr(data, "curr_bb_middle", None)
+        bb_upper = getattr(data, "curr_bb_upper", None)
+        rsi_val = getattr(data, "curr_rsi", None)
+
+        if bb_lower is None or bb_middle is None or bb_upper is None or rsi_val is None:
+            return
+
+        long_signal = (price < bb_lower) and (rsi_val < self.rsi_oversold)
+        short_signal = False
+        long_exit_signal = price >= bb_middle
+
+        if is_invested:
+            if data.position_open_time is None:
+                data.position_open_time = self.time
+                if data.stop_ticket is None and data.target_ticket is None:
+                    avg_price = self.portfolio[data.symbol].average_price
+                    if avg_price <= 0:
+                        avg_price = price
+                    self._place_exit_bracket(data, avg_price, holdings)
+            else:
+                holding_duration = self.time - data.position_open_time
+                max_duration = timedelta(hours=self.timeout_bars)
+                if holding_duration >= max_duration:
+                    self._close_position(data, "Timeout exit")
                     return
 
-            else:  # SHORT position
-                # 1. Signal Exit: Price crosses back below middle band
-                if price < self.sma_middle.Current.Value:
-                    self.Liquidate("ETHUSD", "Signal Exit: Cross Middle Band")
-                    return
-
-            # 2. Timeout Exit: Max holding period reached
-            if self.bars_held >= self.timeout_bars:
-                self.Liquidate("ETHUSD", "Timeout Exit")
+            if long_exit_signal:
+                self._close_position(data, "Signal exit")
                 return
 
-            # Note: SL/TP orders are OCO (handled by brokerage)
-            # They auto-cancel each other on fill
+        if not is_flat:
+            return
 
-            # Reset position tracking on liquidation
-            if holdings == 0:
-                self.position_side = 0
+        if self._has_pending_entry(data):
+            return
+
+        if data.last_exit_time == self.time:
+            return
+
+        if not long_signal:
+            return
+
+        quantity = self._calculate_entry_quantity(data, 1)
+        if quantity <= 0:
+            return
+
+        self._submit_order(data, "market", quantity, tag="Entry")
+
+    def _place_exit_bracket(
+        self, data: SymbolData, fill_price: float, fill_quantity: float
+    ):
+
+        if fill_quantity <= 0:
+            return
+
+        qty = -fill_quantity
+        sl_buffer = 0.005
+
+        stop_price = fill_price * (1.0 - self.stop_loss_pct)
+        stop_price = self._to_tick_size_multiple(data.symbol, stop_price)
+        sl_limit_price = stop_price * (1.0 - sl_buffer)
+        sl_limit_price = self._to_tick_size_multiple(data.symbol, sl_limit_price)
+
+        stop_ticket = self._submit_protective_order(
+            data,
+            "stop_limit",
+            qty,
+            stop_price=stop_price,
+            limit_price=sl_limit_price,
+            tag="SL"
+        )
+        self._register_ticket(data, "stop_ticket", stop_ticket)
+
+        target_price = fill_price * (1.0 + self.take_profit_pct)
+        target_price = self._to_tick_size_multiple(data.symbol, target_price)
+        tp_limit_price = target_price
+
+        target_ticket = self._submit_protective_order(
+            data,
+            "stop_limit",
+            qty,
+            stop_price=target_price,
+            limit_price=tp_limit_price,
+            tag="TP"
+        )
+        self._register_ticket(data, "target_ticket", target_ticket)
+
+    def _submit_protective_order(
+        self,
+        data: SymbolData,
+        order_type: str,
+        quantity: float,
+        *,
+        stop_price: float = None,
+        limit_price: float = None,
+        trailing_percent: float = None,
+        tag: str = "",
+    ):
+
+        symbol = data.symbol
+
+        if order_type == "stop_limit":
+            if stop_price is None or limit_price is None:
+                raise ValueError(
+                    "stop_limit protective order requires stop_price and limit_price"
+                )
+            return self.stop_limit_order(
+                symbol=symbol,
+                quantity=quantity,
+                stop_price=stop_price,
+                limit_price=limit_price,
+                tag=tag,
+            )
+
+        if order_type == "stop_market":
+            if stop_price is None:
+                raise ValueError("stop_market protective order requires stop_price")
+            return self.stop_market_order(
+                symbol=symbol,
+                quantity=quantity,
+                stop_price=stop_price,
+                tag=tag,
+            )
+
+        if order_type == "limit":
+            if limit_price is None:
+                raise ValueError("limit protective order requires limit_price")
+            return self.limit_order(
+                symbol=symbol,
+                quantity=quantity,
+                limit_price=limit_price,
+                tag=tag,
+            )
+
+        if order_type == "trailing_stop":
+            if trailing_percent is None:
+                raise ValueError(
+                    "trailing_stop protective order requires trailing_percent"
+                )
+            return self.trailing_stop_order(
+                symbol=symbol,
+                quantity=quantity,
+                trailing_amount=trailing_percent,
+                trailing_as_percentage=True,
+                tag=tag,
+            )
+
+    def on_order_event(self, order_event: OrderEvent):
+        data = self.order_to_data.get(order_event.order_id)
+        if data is None:
+            data = self.data.get(order_event.symbol.value)
+        if data is None:
+            return
+
+        order = self._get_order(order_event.order_id)
+
+        self._handle_order_event(
+            data,
+            order_event,
+            order,
+        )
+
+    def _handle_order_event(self, data: SymbolData, order_event: OrderEvent, order):
+
+        tag = order.tag if order is not None else ""
+
+        if order_event.status == OrderStatus.SUBMITTED:
+            if tag == "Entry":
+                ticket = self.transactions.get_order_ticket(order_event.order_id)
+                self._register_ticket(data, "entry_ticket", ticket)
+            return
+
+        if order_event.status == OrderStatus.FILLED:
+            is_entry_order = (tag == "Entry") or (data.entry_ticket is not None and data.entry_ticket.order_id == order_event.order_id)
+            if is_entry_order and order_event.fill_quantity > 0:
+                data.pending_entry_time = None
+                data.position_open_time = self.time
+                self._place_exit_bracket(data, order_event.fill_price, order_event.fill_quantity)
+                self._clear_ticket(data, "entry_ticket")
+                return
+
+            is_stop = (tag == "SL") or (data.stop_ticket is not None and data.stop_ticket.order_id == order_event.order_id)
+            is_target = (tag == "TP") or (data.target_ticket is not None and data.target_ticket.order_id == order_event.order_id)
+            is_trailing = (tag == "Trail") or (data.trailing_ticket is not None and data.trailing_ticket.order_id == order_event.order_id)
+
+            if is_stop:
+                self._cancel_ticket(data.target_ticket, "OCO cancel target")
+                self._cancel_ticket(data.trailing_ticket, "OCO cancel trailing")
+                self._clear_ticket(data, "stop_ticket")
+                self._clear_ticket(data, "target_ticket")
+                self._clear_ticket(data, "trailing_ticket")
+                holdings = self.portfolio[data.symbol].quantity
+                if self._is_effectively_flat(data, holdings):
+                    data.position_open_time = None
+                    data.last_exit_time = self.time
+                return
+
+            if is_target:
+                self._cancel_ticket(data.stop_ticket, "OCO cancel stop")
+                self._cancel_ticket(data.trailing_ticket, "OCO cancel trailing")
+                self._clear_ticket(data, "stop_ticket")
+                self._clear_ticket(data, "target_ticket")
+                self._clear_ticket(data, "trailing_ticket")
+                holdings = self.portfolio[data.symbol].quantity
+                if self._is_effectively_flat(data, holdings):
+                    data.position_open_time = None
+                    data.last_exit_time = self.time
+                return
+
+            if is_trailing:
+                self._cancel_ticket(data.stop_ticket, "OCO cancel stop")
+                self._cancel_ticket(data.target_ticket, "OCO cancel target")
+                self._clear_ticket(data, "stop_ticket")
+                self._clear_ticket(data, "target_ticket")
+                self._clear_ticket(data, "trailing_ticket")
+                holdings = self.portfolio[data.symbol].quantity
+                if self._is_effectively_flat(data, holdings):
+                    data.position_open_time = None
+                    data.last_exit_time = self.time
+                return
+
+        if order_event.status in [OrderStatus.CANCELED, OrderStatus.INVALID]:
+            if data.entry_ticket is not None and data.entry_ticket.order_id == order_event.order_id:
+                self._clear_ticket(data, "entry_ticket")
+                data.pending_entry_time = None
+            elif data.stop_ticket is not None and data.stop_ticket.order_id == order_event.order_id:
+                self._clear_ticket(data, "stop_ticket")
+            elif data.target_ticket is not None and data.target_ticket.order_id == order_event.order_id:
+                self._clear_ticket(data, "target_ticket")
+            elif data.trailing_ticket is not None and data.trailing_ticket.order_id == order_event.order_id:
+                self._clear_ticket(data, "trailing_ticket")
